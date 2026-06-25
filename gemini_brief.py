@@ -1,9 +1,12 @@
+from dotenv import load_dotenv
+load_dotenv()
 import requests
 import xml.etree.ElementTree as ET
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-OPENROUTER_API_KEY = "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"
+import os
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 METALS = {
     "Copper": {
