@@ -1,190 +1,154 @@
-from dotenv import load_dotenv
-load_dotenv()
-import requests
-import xml.etree.ElementTree as ET
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import Flask, render_template_string, jsonify
+from gemini_brief import process_metal, METALS
+import threading
 
-import os
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+app = Flask(__name__)
+cache = {"data": None, "loading": False}
 
-METALS = {
-    "Copper": {
-        "ticker": "HG=F",
-        "unit": "USD/lb",
-        "routes": [
-            {"name": "Chile → China", "chokepoints": ["Panama Canal", "South China Sea", "Taiwan Strait"], "risk_factors": ["mine strikes", "port congestion Valparaiso", "Panama Canal water levels"]},
-            {"name": "Peru → China", "chokepoints": ["Panama Canal", "South China Sea"], "risk_factors": ["community blockades", "port congestion Callao"]},
-            {"name": "DRC → Europe", "chokepoints": ["Cape of Good Hope", "Strait of Gibraltar"], "risk_factors": ["regional conflict DRC", "rail disruption to Dar es Salaam"]}
-        ],
-        "currency_pair": ("USD", "CNY"),
-        "news_query": "copper supply chain disruption mining Chile Peru"
-    },
-    "Iron Ore": {
-        "ticker": "TIO=F",
-        "unit": "USD/t",
-        "routes": [
-            {"name": "Australia → China", "chokepoints": ["Lombok Strait", "South China Sea"], "risk_factors": ["Port Hedland congestion", "cyclone season", "Australia-China relations"]},
-            {"name": "Brazil → China", "chokepoints": ["Cape of Good Hope", "Strait of Malacca", "South China Sea"], "risk_factors": ["Vale port disruptions", "Malacca congestion"]},
-            {"name": "South Africa → China", "chokepoints": ["Cape of Good Hope", "Strait of Malacca"], "risk_factors": ["Saldanha Bay port capacity", "Cape weather"]}
-        ],
-        "currency_pair": ("AUD", "CNY"),
-        "news_query": "iron ore supply chain shipping disruption Australia China"
-    },
-    "Aluminum": {
-        "ticker": "ALI=F",
-        "unit": "USD/mt",
-        "routes": [
-            {"name": "Australia → Japan", "chokepoints": ["Lombok Strait", "South China Sea", "Philippine Sea"], "risk_factors": ["South China Sea tensions", "Pacific typhoon season"]},
-            {"name": "Guinea → Europe", "chokepoints": ["Strait of Gibraltar", "Atlantic Ocean"], "risk_factors": ["Guinea port congestion", "political instability Guinea"]},
-            {"name": "Middle East → Global", "chokepoints": ["Strait of Hormuz", "Bab el-Mandeb", "Suez Canal"], "risk_factors": ["Hormuz closure risk", "Iran conflict", "Red Sea security"]}
-        ],
-        "currency_pair": ("USD", "EUR"),
-        "news_query": "aluminum supply chain disruption Middle East smelter"
-    },
-    "Nickel": {
-        "ticker": "^SPGSIK",
-        "unit": "USD/mt",
-        "routes": [
-            {"name": "Indonesia → China", "chokepoints": ["Makassar Strait", "South China Sea"], "risk_factors": ["Indonesian mining quota cuts", "export policy changes"]},
-            {"name": "Philippines → China", "chokepoints": ["South China Sea"], "risk_factors": ["territorial tensions", "typhoon season"]},
-            {"name": "Russia → Europe", "chokepoints": ["Baltic Sea", "Turkish Straits"], "risk_factors": ["sanctions on Russian metals", "Bosporus restrictions"]}
-        ],
-        "currency_pair": ("USD", "IDR"),
-        "news_query": "nickel supply chain disruption Indonesia mining"
-    }
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>METIS — Metals Intelligence</title>
+<meta charset="utf-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0a0a0f; color:#e8e8e8; font-family:'Courier New',monospace; padding:2rem; }
+h1 { font-size:1.6rem; letter-spacing:0.4em; color:#fff; margin-bottom:0.2rem; }
+.sub { color:#444; font-size:0.75rem; letter-spacing:0.3em; margin-bottom:2.5rem; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1rem; margin-bottom:2rem; }
+.card { border:1px solid #1a1a2e; padding:1.2rem; cursor:pointer; transition:all 0.2s; }
+.card:hover { border-color:#444; }
+.card.HIGH { border-top:3px solid #e74c3c; }
+.card.MEDIUM { border-top:3px solid #f39c12; }
+.card.LOW { border-top:3px solid #27ae60; }
+.card-name { font-size:0.65rem; letter-spacing:0.3em; color:#555; margin-bottom:0.5rem; }
+.card-price { font-size:1.8rem; color:#fff; font-weight:bold; }
+.card-unit { font-size:0.65rem; color:#444; margin-bottom:0.8rem; }
+.badge { font-size:0.65rem; padding:3px 10px; letter-spacing:0.15em; display:inline-block; }
+.badge.HIGH { background:#2d0a0a; color:#e74c3c; }
+.badge.MEDIUM { background:#2d1a00; color:#f39c12; }
+.badge.LOW { background:#0a2d0a; color:#27ae60; }
+.badge.LOADING { background:#1a1a2e; color:#555; }
+.detail { display:none; border:1px solid #1a1a2e; padding:1.5rem; margin-bottom:1.5rem; }
+.detail.active { display:block; }
+.detail-title { font-size:0.7rem; letter-spacing:0.3em; color:#555; margin-bottom:1.5rem; }
+.route { border-left:2px solid #1a1a2e; padding-left:1rem; margin-bottom:1.5rem; }
+.route-name { font-size:0.8rem; color:#888; margin-bottom:0.3rem; }
+.route-choke { font-size:0.7rem; color:#444; margin-bottom:0.8rem; }
+.brief { font-size:0.82rem; line-height:1.8; color:#aaa; white-space:pre-wrap; }
+.close { font-size:0.7rem; color:#333; cursor:pointer; letter-spacing:0.2em; margin-top:1rem; display:inline-block; }
+.close:hover { color:#888; }
+footer { color:#222; font-size:0.65rem; letter-spacing:0.15em; margin-top:3rem; border-top:1px solid #111; padding-top:1rem; }
+.status { color:#444; font-size:0.75rem; letter-spacing:0.2em; margin-bottom:1rem; }
+.status.live { color:#27ae60; }
+</style>
+</head>
+<body>
+<h1>METIS</h1>
+<p class="sub">METALS SUPPLY CHAIN DISRUPTION INTELLIGENCE</p>
+<p class="status" id="status">[ LOADING LIVE DATA... ]</p>
+<div class="grid" id="grid"></div>
+<div id="details"></div>
+<footer>METIS v1 &nbsp;|&nbsp; LIVE DATA: YAHOO FINANCE · OPEN.ER-API · GOOGLE NEWS &nbsp;|&nbsp; AI: OPENROUTER</footer>
+
+<script>
+let metalsData = [];
+
+function toggle(name) {
+  document.querySelectorAll('.detail').forEach(d => d.classList.remove('active'));
+  document.getElementById('d-' + name).classList.toggle('active');
 }
 
+function render(metals) {
+  const grid = document.getElementById('grid');
+  const details = document.getElementById('details');
+  grid.innerHTML = '';
+  details.innerHTML = '';
+  metals.forEach(m => {
+    grid.innerHTML += `<div class="card ${m.risk}" onclick="toggle('${m.name}')">
+      <div class="card-name">${m.name.toUpperCase()}</div>
+      <div class="card-price">${m.price}</div>
+      <div class="card-unit">${m.unit}</div>
+      <div class="badge ${m.risk}">${m.risk} RISK</div>
+    </div>`;
+    let routeHtml = m.routes.map(r => `<div class="route">
+      <div class="route-name">${r.name}</div>
+      <div class="route-choke">${r.choke}</div>
+      <div class="brief">${r.brief}</div>
+    </div>`).join('');
+    details.innerHTML += `<div class="detail" id="d-${m.name}">
+      <div class="detail-title">${m.name.toUpperCase()} — ROUTE INTELLIGENCE | ${m.fx}</div>
+      ${routeHtml}
+      <span class="close" onclick="toggle('${m.name}')">[ CLOSE ]</span>
+    </div>`;
+  });
+  document.getElementById('status').textContent = '[ LIVE — ' + new Date().toUTCString() + ' ]';
+  document.getElementById('status').className = 'status live';
+}
 
-def fetch_price(ticker):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        data = r.json()
-        price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
-        return round(float(price), 4)
-    except:
-        return None
+function poll() {
+  fetch('/data').then(r => r.json()).then(data => {
+    if (data.ready) {
+      render(data.metals);
+    } else {
+      setTimeout(poll, 3000);
+    }
+  }).catch(() => setTimeout(poll, 5000));
+}
 
+poll();
+</script>
+</body>
+</html>
+"""
 
-def fetch_fx(base, target):
-    try:
-        r = requests.get(f"https://open.er-api.com/v6/latest/{base}", timeout=10)
-        rate = r.json()["rates"].get(target)
-        return round(rate, 4) if rate else None
-    except:
-        return None
+def get_risk(results):
+    for brief in results.values():
+        if "RISK: HIGH" in brief:
+            return "HIGH"
+    for brief in results.values():
+        if "RISK: MEDIUM" in brief:
+            return "MEDIUM"
+    return "LOW"
 
-
-def fetch_news(query):
-    try:
-        url = f"https://news.google.com/rss/search?q={query.replace(' ', '+')}&hl=en"
-        r = requests.get(url, timeout=10)
-        root = ET.fromstring(r.content)
-        headlines = []
-        for item in root.findall(".//item")[:4]:
-            title = item.find("title")
-            if title is not None and title.text:
-                headlines.append(f"- {title.text}")
-        return "\n".join(headlines) if headlines else "No headlines found."
-    except:
-        return "News unavailable."
-
-
-def generate_brief(metal_name, route, price, fx_rate, news, base, target):
-    price_text = f"{price}" if price else "unavailable"
-    fx_text = f"{base}/{target}: {fx_rate}" if fx_rate else "unavailable"
-
-    prompt = f"""You are a metals supply chain analyst. Write a brief for ONE trade route.
-
-METAL: {metal_name}
-ROUTE: {route['name']}
-CHOKEPOINTS: {', '.join(route['chokepoints'])}
-RISK FACTORS: {', '.join(route['risk_factors'])}
-PRICE: {price_text}
-FX: {fx_text}
-NEWS: {news}
-
-RULES:
-- Only mention chokepoints listed above. Never invent others.
-- Be short and specific.
-
-Respond in EXACTLY this format, nothing else:
-
-RISK: [HIGH / MEDIUM / LOW]
-CONFIDENCE: [HIGH / MODERATE / LOW]
-RISKS:
-- [risk 1]
-- [risk 2]
-WATCH: [one thing to monitor]
-ACTION: [one specific action]"""
-
-    for attempt in range(3):
-        try:
-            r = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                json={
-                    "model": "openrouter/free",
-                    "messages": [{"role": "user", "content": prompt}]
-                },
-                timeout=25
-            )
-            result = r.json()
-            if "choices" in result:
-                content = result["choices"][0]["message"]["content"]
-                if content and content.strip():
-                    return content.strip()
-            time.sleep(3)
-        except:
-            time.sleep(3)
-
-    return "Brief unavailable — retry."
-
-
-def process_metal(metal_name, config):
-    price = fetch_price(config["ticker"])
-    base, target = config["currency_pair"]
-    fx_rate = fetch_fx(base, target)
-    news = fetch_news(config["news_query"])
-
-    results = {}
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        futures = {
-            ex.submit(generate_brief, metal_name, route, price, fx_rate, news, base, target): route["name"]
-            for route in config["routes"]
-        }
-        for f in as_completed(futures):
-            results[futures[f]] = f.result()
-
-    return price, fx_rate, results
-
-
-def run():
-    print("=" * 55)
-    print("   METIS — METALS DISRUPTION INTELLIGENCE")
-    print("=" * 55)
-
-    for metal_name, config in METALS.items():
-        print(f"\n  Processing {metal_name}...")
-        price, fx_rate, results = process_metal(metal_name, config)
-
+def load_data():
+    cache["loading"] = True
+    metals = []
+    for name, config in METALS.items():
+        price, fx_rate, results = process_metal(name, config)
         base, target = config["currency_pair"]
-        print(f"\n{'█' * 55}")
-        print(f"  {metal_name.upper()}")
-        print(f"  Price: {price or 'unavailable'} {config['unit']}   |   {base}/{target}: {fx_rate or 'unavailable'}")
-        print(f"{'█' * 55}")
+        routes = []
+        for r in config["routes"]:
+            routes.append({
+                "name": r["name"],
+                "choke": ", ".join(r["chokepoints"]),
+                "brief": results.get(r["name"], "Unavailable.")
+            })
+        metals.append({
+            "name": name,
+            "price": str(price or "—"),
+            "unit": config["unit"],
+            "fx": f"{base}/{target}: {fx_rate}",
+            "risk": get_risk(results),
+            "routes": routes
+        })
+    cache["data"] = metals
+    cache["loading"] = False
 
-        for route in config["routes"]:
-            brief = results.get(route["name"], "Brief unavailable.")
-            print(f"\n  ── {route['name']}")
-            print(f"     Chokepoints: {', '.join(route['chokepoints'])}")
-            print(f"\n{brief}")
-            print(f"\n  {'─' * 50}")
+@app.route("/")
+def index():
+    if not cache["loading"] and cache["data"] is None:
+        t = threading.Thread(target=load_data)
+        t.daemon = True
+        t.start()
+    return render_template_string(HTML)
 
-    print("\n  All metals processed.")
-
+@app.route("/data")
+def data():
+    if cache["data"]:
+        return jsonify({"ready": True, "metals": cache["data"]})
+    return jsonify({"ready": False})
 
 if __name__ == "__main__":
-    run()
-    #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
+    app.run(debug=True)
