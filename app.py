@@ -5,8 +5,7 @@ import threading
 app = Flask(__name__)
 cache = {"data": None, "loading": False}
 
-HTML = """
-<!DOCTYPE html>
+HTML = """<!DOCTYPE html>
 <html>
 <head>
 <title>METIS — Metals Intelligence</title>
@@ -50,13 +49,11 @@ footer { color:#222; font-size:0.65rem; letter-spacing:0.15em; margin-top:3rem; 
 <div class="grid" id="grid"></div>
 <div id="details"></div>
 <footer>METIS v1 &nbsp;|&nbsp; LIVE DATA: YAHOO FINANCE · OPEN.ER-API · GOOGLE NEWS &nbsp;|&nbsp; AI: OPENROUTER</footer>
-
 <script>
 function toggle(name) {
   document.querySelectorAll('.detail').forEach(d => d.classList.remove('active'));
   document.getElementById('d-' + name).classList.toggle('active');
 }
-
 function render(metals) {
   const grid = document.getElementById('grid');
   const details = document.getElementById('details');
@@ -83,22 +80,16 @@ function render(metals) {
   document.getElementById('status').textContent = '[ LIVE — ' + new Date().toUTCString() + ' ]';
   document.getElementById('status').className = 'status live';
 }
-
 function poll() {
   fetch('/data').then(r => r.json()).then(data => {
-    if (data.ready) {
-      render(data.metals);
-    } else {
-      setTimeout(poll, 3000);
-    }
+    if (data.ready) { render(data.metals); }
+    else { setTimeout(poll, 3000); }
   }).catch(() => setTimeout(poll, 5000));
 }
-
 poll();
 </script>
 </body>
-</html>
-"""
+</html>"""
 
 def get_risk(results):
     for brief in results.values():
